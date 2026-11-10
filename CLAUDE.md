@@ -51,7 +51,7 @@ Request flow for a tool call:
 tools.ts  ->  book-service.ts  ->  bookorbit-client.ts   (HTTP to BookOrbit)
                      |          ->  epub-structure.ts     (TOC/spine -> sections)
                      |          ->  html-to-text.ts       (XHTML slice -> text)
-                     +--------->  cache.ts                (disk, per bookId)
+                     +--------->  cache.ts                (bounded LRU, immutable snapshots)
 ```
 
 `book-service.ts` is the orchestrator; the other modules are pure/single-purpose and are
@@ -77,18 +77,20 @@ unit-tested in isolation. Everything is keyed by **bookId** plus optional fileId
   chapter+offset. Preserve these guarantees when editing tools.
 
 - **Auth is short-lived.** Native SSO uses BookOrbit's OIDC APIs, native refresh tokens,
-  serialized refresh and atomic private session persistence; it never uses the password fallback.
+  serialized refresh and atomic private session persistence. A definite refresh401 removes
+  credentials but retains account identity; HTTP drains and re-enters native SSO. Network/5xx
+  failures retain the session. The identity must match on re-enrollment.
   The existing password path is retained: BookOrbit access tokens expire in ~15 minutes and there is no
   long-lived API key. `bookorbit-client.ts` logs in with username/password, sends the JWT as a
   Bearer token, captures the `refresh_token` cookie, and on a 401 tries `/auth/refresh` then a
   full re-login (`reauthenticate`). BookOrbit's search param is `q` (not `query`), and the base
   URL is normalized to strip a trailing slash.
 
-- **Cache is origin/account/file-revision scoped.** Current BookOrbit access is checked
-  before cached reads. Cold builds are serialized across books and de-duplicated per source.
-  Legacy book-id-only caches are not reused. The extraction steps remain: First `getParsedBook(bookId)` fetches every referenced
-  spine file, extracts each section's text, computes char/word counts, and writes
-  `<CACHE_DIR>/v2/<account>/<bookId>/<revision>/book.json` + `text/section-NNN.txt`.
+- **Derived text is a bounded in-process LRU.** `readBook` checks live BookOrbit access,
+  keys only on file content revision, and returns one immutable metadata/text snapshot.
+  Metadata edits update the response without reparsing content. Native LRU eviction bounds
+  retention (default64MiB); an oversized book is returned uncached. Each tool keeps its
+  snapshot through completion. Cold builds remain serialized and de-duplicated.
 
 - **Annotations (a.k.a. notes/highlights) are a live, uncached passthrough.** Three read-only
   tools — `list_annotations` (all annotations across the library, paginated via `page`/`pageSize`

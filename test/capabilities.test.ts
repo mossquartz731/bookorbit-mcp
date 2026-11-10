@@ -74,8 +74,7 @@ test("rotated native sessions survive restart privately, and concurrent 401s ref
   const initial = {
     baseUrl: "https://books.example",
     userId: 1,
-    accessToken: "expired",
-    refreshToken: "a".repeat(64),
+    credentials: { accessToken: "expired", refreshToken: "a".repeat(64) },
   };
   await store.save(initial);
   let refreshes = 0;
@@ -92,7 +91,7 @@ test("rotated native sessions survive restart privately, and concurrent 401s ref
       if (new Headers(init?.headers).get("Authorization") !== "Bearer renewed")
         return new Response(null, { status: 401 });
       assert.equal(
-        (await store.load()).accessToken,
+        (await store.load()).credentials?.accessToken,
         "renewed",
         "rotation is durable before retry",
       );
@@ -107,7 +106,8 @@ test("rotated native sessions survive restart privately, and concurrent 401s ref
   assert.ok(books.every((book) => book.id === 7));
   assert.equal(refreshes, 1);
   assert.equal(
-    (await new SessionStore(store.path, initial.baseUrl).load()).refreshToken,
+    (await new SessionStore(store.path, initial.baseUrl).load()).credentials
+      ?.refreshToken,
     "b".repeat(64),
   );
   assert.equal((await stat(store.path)).mode & 0o077, 0);
@@ -119,9 +119,7 @@ test("rotated native sessions survive restart privately, and concurrent 401s ref
   await assert.rejects(store.load(), /private/);
 });
 
-test("SDK HTTP contract reads a PDF through pagination, downloads exact bytes, and denies revoked cached access", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "bookorbit-http-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+test("SDK HTTP contract reads a PDF through pagination, downloads exact bytes, and denies revoked cached access", async () => {
   let authorized = true;
   let canDownload = false;
   const client = new BookOrbitClient({
@@ -134,7 +132,15 @@ test("SDK HTTP contract reads a PDF through pagination, downloads exact bytes, a
           id: 7,
           title: "Sample",
           authors: [{ id: 1, name: "Writer" }],
-          files: [{ id: 12, format: "pdf", sizeBytes: pdf.length }],
+          files: [
+            {
+              id: 12,
+              format: "pdf",
+              sizeBytes: pdf.length,
+              fileHash: "fixture-pdf",
+              contentVersion: "1",
+            },
+          ],
         });
       if (String(input).endsWith("/books/files/12/serve")) return new Response(pdf);
       if (String(input).endsWith("/books/files/12/download"))
@@ -142,7 +148,7 @@ test("SDK HTTP contract reads a PDF through pagination, downloads exact bytes, a
       throw new Error("Unexpected fixture endpoint");
     },
   });
-  const service = new BookService(client, new BookCache(dir));
+  const service = new BookService(client, new BookCache());
   const handler = httpHandler(() => {
     const server = new McpServer({ name: "fixture", version: "1" });
     registerTools(server, client, service);
@@ -229,4 +235,42 @@ test("SDK HTTP contract reads a PDF through pagination, downloads exact bytes, a
     (await handler(new Request("http://connector.internal:3000/mcp"))).status,
     405,
   );
+});
+
+test("only a definitively rejected refresh retires credentials and permits same-account re-enrollment", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "bookorbit-expiry-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new SessionStore(join(dir, "session.json"), "https://books.example");
+  const original = {
+    baseUrl: store.baseUrl,
+    userId: 1,
+    credentials: { accessToken: "expired", refreshToken: "a".repeat(64) },
+  };
+  for (const status of [503, 401]) {
+    await store.save(original);
+    let reenrollments = 0;
+    const client = new BookOrbitClient({
+      baseUrl: store.baseUrl,
+      session: await store.load(),
+      sessionStore: store,
+      onSessionExpired: () => {
+        reenrollments++;
+      },
+      fetchImpl: async (input) =>
+        new Response(null, {
+          status: String(input).endsWith("/auth/refresh") ? status : 401,
+        }),
+    });
+    await assert.rejects(client.getBook(7));
+    const retained = await store.load();
+    assert.equal(reenrollments, status === 401 ? 1 : 0);
+    assert.deepEqual(retained.credentials, status === 401 ? null : original.credentials);
+    assert.equal(retained.userId, original.userId);
+  }
+  await assert.rejects(store.save({ ...original, userId: 2 }), /previously enrolled/);
+  await store.save({
+    ...original,
+    credentials: { accessToken: "reenrolled", refreshToken: "b".repeat(64) },
+  });
+  assert.equal((await store.load()).credentials?.accessToken, "reenrolled");
 });

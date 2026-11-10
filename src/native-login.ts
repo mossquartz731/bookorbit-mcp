@@ -1,9 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { access } from "node:fs/promises";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
-import { credentialsSchema, SessionStore } from "./session.js";
+import { credentialsSchema, SessionStore, SessionIdentityError } from "./session.js";
 
 const providerSchema = z.object({
   slug: z.string(),
@@ -51,17 +50,16 @@ export async function nativeLogin(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   if (!config.sessionFile) throw new Error("Set BOOKORBIT_SESSION_FILE for native SSO.");
-  // Deliberately do not replace an active identity as a side effect of login.
-  let exists = false;
+  const store = new SessionStore(config.sessionFile, config.client.baseUrl);
+  let existing;
   try {
-    await access(config.sessionFile);
-    exists = true;
+    existing = await store.load();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  if (exists)
+  if (existing?.credentials)
     throw new Error(
-      "Session file already exists. Stop the connector and revoke/remove the old native session before enrolling again.",
+      "A usable native session already exists; revoke it in BookOrbit before re-enrollment.",
     );
   const redirect = validateRedirect(config.client.baseUrl, env.SSO_REDIRECT_URI ?? "");
   const api = `${config.client.baseUrl}/api/v1`;
@@ -150,14 +148,23 @@ export async function nativeLogin(
         const userId = z
           .object({ user: z.object({ id: z.number().int().positive() }) })
           .parse(body).user.id;
-        await new SessionStore(config.sessionFile!, config.client.baseUrl).save({
-          ...credentials,
-          baseUrl: config.client.baseUrl,
-          userId,
-        });
+        try {
+          await store.save({ credentials, baseUrl: config.client.baseUrl, userId });
+        } catch (error) {
+          // Retire a newly issued session that cannot become this connector's identity.
+          await json("/auth/logout", { refreshToken: credentials.refreshToken }).catch(
+            () => undefined,
+          );
+          throw error;
+        }
         res.end("BookOrbit MCP enrolled. You can close this window.");
         finish();
-      } catch {
+      } catch (error) {
+        if (error instanceof SessionIdentityError) {
+          res.writeHead(403).end(error.message);
+          finish(error);
+          return;
+        }
         res
           .writeHead(502)
           .end(
@@ -173,7 +180,6 @@ export async function nativeLogin(
     function finish(error?: Error) {
       clearTimeout(timer);
       server.close();
-      server.closeIdleConnections();
       if (error) reject(error);
       else resolve();
     }

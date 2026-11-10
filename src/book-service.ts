@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { parsePdf } from "./pdf-text.js";
 import type { BookFile } from "./types.js";
 import type { BookOrbitClient } from "./bookorbit-client.js";
-import type { BookCache } from "./cache.js";
+import type { BookCache, BookSnapshot } from "./cache.js";
 import { resolveSections } from "./epub-structure.js";
 import { htmlToText } from "./html-to-text.js";
 import type { ParsedBook, SectionWithSize } from "./types.js";
@@ -20,7 +20,7 @@ const MAX_HITS_PER_SECTION = 5;
 
 /** Orchestrates the client, EPUB structure resolution, extraction, and cache. */
 export class BookService {
-  private inflight = new Map<string, Promise<ParsedBook>>();
+  private inflight = new Map<string, Promise<BookSnapshot>>();
   private buildQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -28,55 +28,63 @@ export class BookService {
     private readonly cache: BookCache,
   ) {}
 
-  /** Get a parsed+measured book, building and caching it on first access. */
-  async getParsedBook(bookId: number, fileId?: number): Promise<ParsedBook> {
-    // Always re-check BookOrbit access, including cache hits and revoked sessions.
+  /** Live authorization, then one immutable content snapshot for the whole operation. */
+  async readBook(bookId: number, fileId?: number): Promise<BookSnapshot> {
     const detail = await this.client.getBook(bookId);
     const file = selectBookFile(detail.files, fileId);
+    if (!file.fileHash && !file.contentVersion)
+      throw new Error("BookOrbit file content revision is required.");
     const key = createHash("sha256")
-      .update(JSON.stringify({ version: 2, bookId, updatedAt: detail.updatedAt, file }))
+      .update(
+        JSON.stringify([
+          bookId,
+          file.id,
+          file.format,
+          file.fileHash,
+          file.contentVersion,
+        ]),
+      )
       .digest("hex");
-    const cached = await this.cache.readParsed(bookId, key);
-    if (cached) return cached;
-    const existing = this.inflight.get(key);
-    if (existing) return existing;
-    const build = this.buildQueue
-      .then(async () => {
-        if (file.format.toLowerCase() === "pdf") {
-          const data = await this.client.getBookFile(bookId, file.id, {
-            purpose: "read",
-          });
-          const { parsed, texts } = await parsePdf(
-            data,
-            bookId,
-            detail.title,
-            detail.authors.map((author) => author.name).join(", "),
-          );
-          Object.assign(parsed, { fileId: file.id, cacheKey: key });
-          await this.cache.writeParsed(parsed, texts);
-          return parsed;
-        }
-        return this.buildParsedBook(bookId, key, file.id);
-      })
-      .finally(() => this.inflight.delete(key));
-    this.buildQueue = build.catch(() => undefined);
-    this.inflight.set(key, build);
-    return build;
-  }
-
-  /** Read text after checking current access and source revision. */
-  async getSectionText(bookId: number, index: number, fileId?: number): Promise<string> {
-    const parsed = await this.getParsedBook(bookId, fileId);
-    if (!parsed.sections[index]) throw new Error("Section does not exist.");
-    const text = await this.cache.readSectionText(bookId, index, parsed.cacheKey);
-    if (text == null)
-      throw new Error("Incomplete book cache; remove this book's cache and retry.");
-    return text;
+    let snapshot = this.cache.get(key);
+    if (!snapshot) {
+      let build = this.inflight.get(key);
+      if (!build) {
+        build = this.buildQueue
+          .then(async () => {
+            if (file.format.toLowerCase() === "pdf") {
+              const data = await this.client.getBookFile(bookId, file.id, {
+                purpose: "read",
+              });
+              const { parsed, texts } = await parsePdf(
+                data,
+                bookId,
+                detail.title,
+                detail.authors.map((author) => author.name).join(", "),
+              );
+              return this.cache.store(key, { ...parsed, fileId: file.id }, texts);
+            }
+            const { parsed, texts } = await this.buildParsedBook(bookId, file.id);
+            return this.cache.store(key, parsed, texts);
+          })
+          .finally(() => this.inflight.delete(key));
+        this.buildQueue = build.catch(() => undefined);
+        this.inflight.set(key, build);
+      }
+      snapshot = await build;
+    }
+    return Object.freeze({
+      ...snapshot,
+      parsed: Object.freeze({
+        ...snapshot.parsed,
+        title: detail.title,
+        author: detail.authors.map((author) => author.name).join(", "),
+      }),
+    });
   }
 
   /** Contiguous whole-book text, with explicit continuation instead of silent truncation. */
   async getBookText(bookId: number, offset = 0, maxChars = 24000, fileId?: number) {
-    const parsed = await this.getParsedBook(bookId, fileId);
+    const { parsed, texts } = await this.readBook(bookId, fileId);
     const chunks: string[] = [];
     const totalChars = parsed.totalChars + Math.max(0, parsed.sections.length - 1) * 2;
     const start = Math.min(offset, totalChars);
@@ -89,12 +97,7 @@ export class BookService {
         position += sectionLength;
         continue;
       }
-      const raw = await this.cache.readSectionText(
-        bookId,
-        section.index,
-        parsed.cacheKey,
-      );
-      if (raw == null) throw new Error("Incomplete book cache.");
+      const raw = texts[section.index];
       const text = (section.index ? "\n\n" : "") + raw;
       if (position + text.length > offset && returned < maxChars) {
         const part = text.slice(
@@ -130,19 +133,14 @@ export class BookService {
     caseSensitive = false,
     fileId?: number,
   ): Promise<SearchHit[]> {
-    const parsed = await this.getParsedBook(bookId, fileId);
+    const { parsed, texts } = await this.readBook(bookId, fileId);
     const needle = caseSensitive ? query : query.toLowerCase();
     const hits: SearchHit[] = [];
     let charsBefore = 0;
 
     for (const section of parsed.sections) {
       if (hits.length >= maxResults) break;
-      const text = await this.cache.readSectionText(
-        bookId,
-        section.index,
-        parsed.cacheKey,
-      );
-      if (text == null) throw new Error("Incomplete book cache.");
+      const text = texts[section.index];
       const haystack = caseSensitive ? text : text.toLowerCase();
 
       let from = 0;
@@ -167,11 +165,7 @@ export class BookService {
 
   // --- build ---------------------------------------------------------------
 
-  private async buildParsedBook(
-    bookId: number,
-    cacheKey: string,
-    fileId: number,
-  ): Promise<ParsedBook> {
+  private async buildParsedBook(bookId: number, fileId: number): Promise<BookSnapshot> {
     const info = await this.client.getEpubInfo(bookId);
     const sections = resolveSections(info);
 
@@ -200,7 +194,6 @@ export class BookService {
 
     const parsed: ParsedBook = {
       bookId,
-      cacheKey,
       fileId,
       format: "epub",
       title: info.metadata.title ?? "Unknown title",
@@ -208,8 +201,7 @@ export class BookService {
       sections: measured,
       totalChars,
     };
-    await this.cache.writeParsed(parsed, sectionTexts);
-    return parsed;
+    return { parsed, texts: sectionTexts };
   }
 }
 

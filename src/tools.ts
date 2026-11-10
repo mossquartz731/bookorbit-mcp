@@ -279,7 +279,7 @@ export function registerTools(
     },
     async ({ bookId, fileId }) =>
       guard(async () => {
-        const parsed = await service.getParsedBook(bookId, fileId);
+        const { parsed } = await service.readBook(bookId, fileId);
         return ok({
           bookId: parsed.bookId,
           title: parsed.title,
@@ -335,7 +335,7 @@ export function registerTools(
     },
     async ({ bookId, fileId, chapter, offset, maxChars }) =>
       guard(async () => {
-        const parsed = await service.getParsedBook(bookId, fileId);
+        const { parsed, texts } = await service.readBook(bookId, fileId);
         const section = parsed.sections[chapter];
         if (!section) {
           return fail(
@@ -343,7 +343,7 @@ export function registerTools(
               `chapters (0..${parsed.sections.length - 1}).`,
           );
         }
-        const full = await service.getSectionText(bookId, chapter, fileId);
+        const full = texts[chapter];
         const start = Math.min(offset ?? 0, full.length);
         const cap = maxChars ?? DEFAULT_MAX_CHARS;
         const text = full.slice(start, start + cap);

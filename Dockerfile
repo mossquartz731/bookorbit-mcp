@@ -17,4 +17,3 @@ COPY --from=build /app/node_modules/ node_modules/
 USER 1000:1000
 EXPOSE 3000
 ENTRYPOINT ["node", "dist/server.js"]
-CMD ["serve"]

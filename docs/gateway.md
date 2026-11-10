@@ -14,22 +14,22 @@ read that account's books and annotations.
 
 ## Deployment checklist
 
-| Owner      | Required setting                                                                                                                   |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Deployment | Install/build the locked package once; run `node /opt/bookorbit-mcp/dist/server.js` from a persistent release directory            |
-| Network    | Permit only LiteLLM to connector TCP 3000; do not publish `/mcp` through the public proxy                                          |
-| Connector  | `MCP_TRANSPORT=http`, private bind address, exact `MCP_ALLOWED_HOSTS` including port                                               |
-| Storage    | One process / one writable session file; private persistent session/cache directories; stop the normal connector during enrollment |
-| Proxy      | Route only the marked BookOrbit callback below to the enrollment listener                                                          |
-| IdP        | Add the exact marked redirect URI to the **existing BookOrbit OIDC client**, keeping its existing redirect URIs                    |
-| Operations | Disable/redact callback query access logs at proxy/IdP; never log native tokens                                                    |
+| Owner      | Required setting                                                                                                                  |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Deployment | Install/build the locked package once; run `node /opt/bookorbit-mcp/dist/server.js` from a persistent release directory           |
+| Network    | Permit only LiteLLM to connector TCP 3000; do not publish `/mcp` through the public proxy                                         |
+| Connector  | `MCP_TRANSPORT=http`, private bind address, exact `MCP_ALLOWED_HOSTS` including port                                              |
+| Storage    | One process / one writable session file; private persistent session directory; bounded in-process text cache; one serving process |
+| Proxy      | Route only the marked BookOrbit callback below to the enrollment listener                                                         |
+| IdP        | Add the exact marked redirect URI to the **existing BookOrbit OIDC client**, keeping its existing redirect URIs                   |
+| Operations | Disable/redact callback query access logs at proxy/IdP; never log native tokens                                                   |
 
 Example connector environment (values are deployment configuration, not secrets):
 
 ```dotenv
 BOOKORBIT_URL=https://books.example.com
 BOOKORBIT_SESSION_FILE=/var/lib/bookorbit-mcp/session.json
-CACHE_DIR=/var/cache/bookorbit-mcp
+CACHE_MAX_MIB=64
 MCP_TRANSPORT=http
 MCP_HOST=0.0.0.0
 MCP_PORT=3000
@@ -43,9 +43,7 @@ The ordinary HTTP serving process has no login or callback endpoint.
 
 ## Container first start
 
-The published image runs `serve`: it enrolls through the same native login flow
-only when the configured session file is absent, then serves HTTP in the same
-process. Mount private persistent state and cache directories, set the configuration
+HTTP mode enrolls through the same native login flow when credentials are absent, then serves HTTP in the same process. Mount a private persistent state directory, set the configuration
 below, and follow the authorization URL in the application's logs. A restart
 reuses the session. Enrollment expires after five minutes; normal controller
 restart policy permits a fresh attempt. No token copying, exec grant or bootstrap
@@ -84,17 +82,24 @@ sign-in. This bounded command uses BookOrbit's public provider discovery and
 server-generated state, PKCE S256 and nonce, then calls BookOrbit's native OIDC
 callback API. BookOrbit owns code exchange, IdP credentials, identity validation
 and account mapping. The connector stores a mode-0600 native session atomically
-and exits after success or a five-minute timeout. It refuses to overwrite an
-existing session. No password, IdP client secret, copied browser cookie or
+and exits after success or a five-minute timeout. It refuses to replace an existing credential-bearing session and pins re-enrollment to the previous BookOrbit user ID. No password, IdP client secret, copied browser cookie or
 standalone authentication bridge is involved.
 
 Start the normal connector using the same installed entry point. On an expired
-access token, concurrent requests share one refresh; rotated credentials are
-persisted before retries. Native refresh failure requires re-enrollment rather
-than falling back to a password. For re-enrollment, stop the connector, revoke
-its named `bookorbit-mcp` session in BookOrbit's session management, remove the
-private session file, and run the native login command again. Never share the
-same rotating session file between processes or replicas.
+access token, concurrent requests share one refresh; rotated credentials reach disk
+before retries. A definitive native refresh401 retires credentials while preserving
+the BookOrbit account ID. HTTP drains its current responses and re-enters native SSO
+on the same listener; the owner signs in again without editing a PVC or copying a
+token. Network/5xx failures retain the credential for retry. Normal inactivity expiry
+is respected, with no background keepalive. Re-enrollment with another account is
+refused and its newly issued session is revoked. Never share the rotating session
+file between processes or replicas. Stdio clients re-run the native login command
+and restart after such expiry.
+
+Derived text is held in a bounded in-process LRU, keyed by file content revision.
+Metadata edits do not duplicate text. Each operation owns its immutable snapshot
+through completion, including cache eviction and oversized uncached books. Restart
+reparses locally on demand; no inference or cache-volume maintenance is required.
 
 PDF text extraction uses BookOrbit's native inline `/serve` route and needs only
 the account's normal library reading access. `get_book_file` uses the original-file

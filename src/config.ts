@@ -1,10 +1,8 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { ClientConfig } from "./bookorbit-client.js";
 
 export interface AppConfig {
   client: ClientConfig;
-  cacheDir: string;
+  cacheMaxMiB: number;
   sessionFile?: string;
   transport: "stdio" | "http";
   host: string;
@@ -36,7 +34,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
-  const cacheDir = env.CACHE_DIR?.trim() || join(homedir(), ".cache", "bookorbit-mcp");
+  const cacheMaxMiB = Number(env.CACHE_MAX_MIB ?? "64");
+  if (!Number.isInteger(cacheMaxMiB) || cacheMaxMiB < 1 || cacheMaxMiB > 1024)
+    throw new Error("CACHE_MAX_MIB must be an integer from 1 to 1024.");
 
   const url = new URL(baseUrl);
   if (
@@ -74,6 +74,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port,
     allowedHosts,
     client: { baseUrl: baseUrl.replace(/\/+$/, ""), username, password, token },
-    cacheDir,
+    cacheMaxMiB,
   };
 }

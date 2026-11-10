@@ -12,7 +12,7 @@ model find a book, look at its chapter list, and pull only the pieces it needs.
 | Fork maintenance | Policy                                                                                                                                 |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Owner            | `mossquartz731/bookorbit-mcp`; homelab consumes a tested image digest                                                                  |
-| Publication      | CI validates first, then publishes immutable `sha-<commit>` images and a `latest` update channel on trusted pushes                     |
+| Publication      | CI validates first, then publishes immutable `sha-<commit>` images on trusted pushes; only main advances the `latest` update channel   |
 | Updates          | Dependabot maintains npm, Docker and GitHub Actions inputs                                                                             |
 | Retirement       | Return to upstream when it supplies PDF/whole-book access, native refreshable SSO and HTTP transport with equivalent access boundaries |
 
@@ -23,7 +23,7 @@ flowchart LR
     C["Hermes / ChatGPT / MCP clients"] -->|Gateway authentication| G["Existing LiteLLM"]
     G -->|Private HTTP /mcp| M["bookorbit-mcp"]
     M -->|Native BookOrbit session| B["BookOrbit books and live notes"]
-    M --> P["Local PDF.js and text cache"]
+    M --> P["Local PDF.js and bounded memory cache"]
 ```
 
 | Capability     | Before                   | Now                                                          |
@@ -34,8 +34,8 @@ flowchart LR
 | Transport      | stdio                    | Also stateless Streamable HTTP behind an existing gateway    |
 | Notes          | Live BookOrbit reads     | Same live reads; no export or extra index                    |
 
-EPUB text uses BookOrbit's reader API; PDF text uses PDF.js locally. Cached text
-is isolated by origin/account and source file revision. Every read checks current
+EPUB text uses BookOrbit's reader API; PDF text uses PDF.js locally. A 64 MiB in-process LRU retains derived text by file content revision; each request owns one immutable snapshot.
+The process acts for one account. Every read checks current
 BookOrbit access, including cache hits. Annotations are always fetched live.
 
 Three guardrails keep the model from drowning:
@@ -141,7 +141,7 @@ Set these as environment variables (or in a local `.env` — see `.env.example`)
 | `BOOKORBIT_SESSION_FILE`                    | SSO mode          | Private native-session file; do not also set password/token variables |
 | `BOOKORBIT_USERNAME` + `BOOKORBIT_PASSWORD` | password mode     | Existing login and refresh behavior                                   |
 | `BOOKORBIT_TOKEN`                           | token mode        | Static access token; does not auto-refresh                            |
-| `CACHE_DIR`                                 | optional          | Default `~/.cache/bookorbit-mcp`; keep private                        |
+| `CACHE_MAX_MIB`                             | optional          | In-process text/metadata budget, default 64 MiB; no cache volume      |
 | `MCP_TRANSPORT`                             | optional          | `stdio` (default) or `http`                                           |
 | `MCP_HOST` / `MCP_PORT`                     | optional          | Default `127.0.0.1:3000`                                              |
 | `MCP_ALLOWED_HOSTS`                         | non-loopback HTTP | Comma-separated exact Host header values, including non-default ports |

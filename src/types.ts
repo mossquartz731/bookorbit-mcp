@@ -21,6 +21,8 @@ export interface BookFile {
   filename: string | null;
   absolutePath: string | null;
   durationSeconds: number | null;
+  fileHash: string | null;
+  contentVersion: string;
 }
 
 /** Full book detail (GET /books/{id}) — only the fields we use are typed. */
@@ -429,10 +431,9 @@ export interface ParsedBook {
   bookId: number;
   title: string;
   author: string;
-  sections: SectionWithSize[];
+  sections: readonly SectionWithSize[];
   totalChars: number;
   format?: "epub" | "pdf";
   fileId?: number;
-  cacheKey?: string;
   requiresOcrPages?: number[];
 }

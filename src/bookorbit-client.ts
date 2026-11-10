@@ -43,6 +43,7 @@ export interface ClientConfig {
   token?: string;
   session?: NativeSession;
   sessionStore?: SessionStore;
+  onSessionExpired?: () => void;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -75,7 +76,9 @@ export class BookOrbitClient {
     this.apiBase = `${config.baseUrl.replace(/\/+$/, "")}/api/v1`;
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.nativeSession = config.session;
-    this.accessToken = config.session?.accessToken ?? config.token ?? null;
+    if (config.session && !config.session.credentials)
+      throw new Error("Native SSO enrollment is required.");
+    this.accessToken = config.session?.credentials?.accessToken ?? config.token ?? null;
   }
 
   private get canReauthenticate(): boolean {
@@ -479,22 +482,38 @@ export class BookOrbitClient {
         redirect: "error",
         signal: AbortSignal.timeout(30_000),
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken: this.nativeSession.refreshToken }),
+        body: JSON.stringify({
+          refreshToken: this.nativeSession.credentials!.refreshToken,
+        }),
       });
+      if (res.status === 401) {
+        await res.body?.cancel();
+        if (!this.config.sessionStore)
+          throw new Error("Native session requires a session store.");
+        await this.config.sessionStore.save({ ...this.nativeSession, credentials: null });
+        this.nativeSession = undefined;
+        this.accessToken = null;
+        this.config.onSessionExpired?.();
+        throw new BookOrbitError(
+          "Native session expired; complete native SSO enrollment again.",
+          401,
+          "/auth/refresh",
+        );
+      }
       if (!res.ok)
         throw new BookOrbitError(
-          "Native session refresh failed; run bookorbit-mcp login again.",
+          "Native session refresh is temporarily unavailable; retry later.",
           res.status,
           "/auth/refresh",
         );
       const credentials = credentialsSchema.parse(await res.json());
-      const session = { ...this.nativeSession, ...credentials };
+      const session = { ...this.nativeSession, credentials };
       // Rotating refresh tokens must reach disk before any caller uses the new access token.
       if (!this.config.sessionStore)
         throw new Error("Native session requires a session store.");
       await this.config.sessionStore.save(session);
       this.nativeSession = session;
-      this.accessToken = session.accessToken;
+      this.accessToken = credentials.accessToken;
       return true;
     }
     if (this.refreshCookie) {

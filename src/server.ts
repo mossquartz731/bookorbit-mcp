@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { httpHandler } from "./http.js";
 import { nativeLogin } from "./native-login.js";
@@ -36,60 +35,80 @@ async function main(): Promise<void> {
     await nativeLogin(config);
     return;
   }
-  if (command && command !== "serve")
-    throw new Error("Usage: bookorbit-mcp [serve|login]");
-  if (command === "serve" && config.transport !== "http")
-    throw new Error("serve requires MCP_TRANSPORT=http.");
-  if (command === "serve" && config.sessionFile && !existsSync(config.sessionFile))
-    await nativeLogin(config);
+  if (command) throw new Error("Usage: bookorbit-mcp [login]");
   const sessionStore = config.sessionFile
     ? new SessionStore(config.sessionFile, config.client.baseUrl)
     : undefined;
-  const session = await sessionStore?.load();
-  const client = new BookOrbitClient({ ...config.client, session, sessionStore });
-  // Account + origin isolation; old book-id-only caches are deliberately not reused.
-  const scope = createHash("sha256")
-    .update(
-      JSON.stringify([
-        config.client.baseUrl,
-        session?.userId ?? config.client.username ?? config.client.token,
-      ]),
-    )
-    .digest("hex");
-  const cache = new BookCache(join(config.cacheDir, "v2", scope));
-  const service = new BookService(client, cache);
-
-  const createServer = () => {
-    const server = new McpServer({
-      name: "bookorbit-mcp",
-      version: "0.1.0",
+  for (;;) {
+    let session;
+    try {
+      session = await sessionStore?.load();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (sessionStore && !session?.credentials) {
+      if (config.transport !== "http")
+        throw new Error("Complete native SSO enrollment with bookorbit-mcp login.");
+      await nativeLogin(config);
+      session = await sessionStore.load();
+    }
+    let expired = () => {};
+    const client = new BookOrbitClient({
+      ...config.client,
+      session,
+      sessionStore,
+      onSessionExpired: () => expired(),
     });
-    registerTools(server, client, service);
-    return server;
-  };
-  if (config.transport === "http") {
-    const allowedHosts = config.allowedHosts ?? [
-      `127.0.0.1:${config.port}`,
-      `localhost:${config.port}`,
-      `[::1]:${config.port}`,
-    ];
-    const listener = serve({
-      fetch: httpHandler(createServer, allowedHosts),
-      hostname: config.host,
-      port: config.port,
-    });
-    for (const signal of ["SIGTERM", "SIGINT"] as const)
-      process.once(signal, () => listener.close());
-    console.error(
-      `bookorbit-mcp ready (private HTTP, port ${config.port}). Client authentication belongs to the gateway.`,
+    const service = new BookService(
+      client,
+      new BookCache(config.cacheMaxMiB * 1024 * 1024),
     );
-    return;
+    const createServer = () => {
+      const server = new McpServer({ name: "bookorbit-mcp", version: "0.1.0" });
+      registerTools(server, client, service);
+      return server;
+    };
+    if (config.transport !== "http") {
+      await createServer().connect(new StdioServerTransport());
+      console.error("bookorbit-mcp server ready (stdio).");
+      return;
+    }
+    const restart = await new Promise<boolean>((resolve, reject) => {
+      let reenroll = false;
+      let stopping = false;
+      const allowedHosts = config.allowedHosts ?? [
+        `127.0.0.1:${config.port}`,
+        `localhost:${config.port}`,
+        `[::1]:${config.port}`,
+      ];
+      const listener = serve({
+        fetch: httpHandler(createServer, allowedHosts),
+        hostname: config.host,
+        port: config.port,
+      });
+      const shutdown = () => {
+        stopping = true;
+        listener.close();
+      };
+      expired = () => {
+        if (!stopping) {
+          reenroll = true;
+          listener.close();
+        }
+      };
+      for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, shutdown);
+      listener.on("error", reject);
+      listener.on("close", () => {
+        for (const signal of ["SIGTERM", "SIGINT"] as const)
+          process.off(signal, shutdown);
+        resolve(reenroll && !stopping);
+      });
+      console.error(
+        `bookorbit-mcp ready (private HTTP, port ${config.port}). Client authentication belongs to the gateway.`,
+      );
+    });
+    if (!restart) return;
   }
-  const server = createServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  // stderr is safe for logs; stdout is reserved for the MCP protocol.
-  console.error("bookorbit-mcp server ready (stdio).");
 }
 
 main().catch((err) => {

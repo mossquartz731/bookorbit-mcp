@@ -8,11 +8,18 @@ export const credentialsSchema = z.object({
   refreshToken: z.string().regex(/^[a-f0-9]{64}$/),
 });
 export type NativeCredentials = z.infer<typeof credentialsSchema>;
-const sessionSchema = credentialsSchema.extend({
+const sessionSchema = z.object({
   baseUrl: z.string().url(),
   userId: z.number().int().positive(),
+  credentials: credentialsSchema.nullable(),
 });
 export type NativeSession = z.infer<typeof sessionSchema>;
+
+export class SessionIdentityError extends Error {
+  constructor() {
+    super("Sign in with the previously enrolled BookOrbit account.");
+  }
+}
 
 /** One BookOrbit native session, owned by one connector process. Never log it. */
 export class SessionStore {
@@ -32,6 +39,14 @@ export class SessionStore {
 
   async save(session: NativeSession): Promise<void> {
     const validated = sessionSchema.parse(session);
+    let existing: NativeSession | undefined;
+    try {
+      existing = await this.load();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (existing && existing.userId !== validated.userId)
+      throw new SessionIdentityError();
     if (validated.baseUrl !== this.baseUrl) throw new Error("Session URL mismatch.");
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const temp = `${this.path}.${randomUUID()}.tmp`;
