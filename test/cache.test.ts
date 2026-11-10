@@ -8,6 +8,7 @@ const parsed = {
   author: "Author",
   sections: [],
   totalChars: 1500,
+  requiresOcrPages: [3],
 };
 
 test("bounded LRU evicts UTF-16 text without invalidating an operation's snapshot", () => {
@@ -18,6 +19,9 @@ test("bounded LRU evicts UTF-16 text without invalidating an operation's snapsho
   cache.store("two", parsed, [text]);
   assert.equal(cache.get("one"), undefined);
   assert.equal(first.texts[0], text);
+  assert.throws(() => {
+    (first.parsed.requiresOcrPages as number[]).push(4);
+  }, TypeError);
   assert.throws(() => {
     (first.texts as string[])[0] = "tamper";
   }, TypeError);

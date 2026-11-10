@@ -32,6 +32,9 @@ export class BookCache {
     const snapshot = Object.freeze({
       parsed: Object.freeze({
         ...parsed,
+        requiresOcrPages: parsed.requiresOcrPages
+          ? Object.freeze([...parsed.requiresOcrPages])
+          : undefined,
         sections: Object.freeze(
           parsed.sections.map((section) => Object.freeze({ ...section })),
         ),

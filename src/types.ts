@@ -435,5 +435,5 @@ export interface ParsedBook {
   totalChars: number;
   format?: "epub" | "pdf";
   fileId?: number;
-  requiresOcrPages?: number[];
+  requiresOcrPages?: readonly number[];
 }
