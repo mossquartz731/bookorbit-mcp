@@ -41,6 +41,17 @@ SSO_REDIRECT_URI=https://books.example.com/oauth2-callback?bookorbit_mcp=1
 Allow the existing reverse proxy to reach TCP 3000 **only during enrollment**.
 The ordinary HTTP serving process has no login or callback endpoint.
 
+## Container first start
+
+The published image runs `serve`: it enrolls through the same native login flow
+only when the configured session file is absent, then serves HTTP in the same
+process. Mount private persistent state and cache directories, set the configuration
+below, and follow the authorization URL in the application's logs. A restart
+reuses the session. Enrollment expires after five minutes; normal controller
+restart policy permits a fresh attempt. No token copying, exec grant or bootstrap
+Job is needed. A TCP readiness check observes the listener during enrollment;
+verify MCP tool discovery after sign-in before declaring the deployment accepted.
+
 ## Native SSO enrollment
 
 BookOrbit 3.7 accepts its existing web callback origin/path or its exact native

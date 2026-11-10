@@ -36,7 +36,12 @@ async function main(): Promise<void> {
     await nativeLogin(config);
     return;
   }
-  if (command) throw new Error("Usage: bookorbit-mcp [login]");
+  if (command && command !== "serve")
+    throw new Error("Usage: bookorbit-mcp [serve|login]");
+  if (command === "serve" && config.transport !== "http")
+    throw new Error("serve requires MCP_TRANSPORT=http.");
+  if (command === "serve" && config.sessionFile && !existsSync(config.sessionFile))
+    await nativeLogin(config);
   const sessionStore = config.sessionFile
     ? new SessionStore(config.sessionFile, config.client.baseUrl)
     : undefined;
