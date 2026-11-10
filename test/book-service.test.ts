@@ -1,8 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BookCache } from "../src/cache.js";
@@ -22,32 +19,46 @@ const chapterXhtml = readFileSync(
 );
 
 /** A stub client that serves the fixture info and returns XHTML per file. */
-function stubClient(): { client: BookOrbitClient; fileFetches: string[] } {
+function stubClient() {
   const fileFetches: string[] = [];
+  const metadata = {
+    id: 327,
+    title: "Sample Book",
+    authors: [{ id: 1, name: "Test Author" }],
+    updatedAt: "one",
+    files: [
+      { id: 1, format: "epub", sizeBytes: 123, fileHash: "fixture", contentVersion: "1" },
+    ],
+  };
   const client = {
+    async getBook() {
+      return structuredClone(metadata);
+    },
     async getEpubInfo() {
       return info;
     },
     async getEpubFile(_bookId: number, path: string) {
       fileFetches.push(path);
       // Serve the bundled chapter for its file; a stub for the rest.
-      if (path.endsWith("bundle.xhtml")) return chapterXhtml;
+      if (path.endsWith("bundle.xhtml"))
+        return metadata.files[0].contentVersion === "1"
+          ? chapterXhtml
+          : chapterXhtml.replace(/the/g, "REVISED_CONTENT_SENTINEL");
       return `<html><body><p>Content of ${path}</p></body></html>`;
     },
   } as unknown as BookOrbitClient;
-  return { client, fileFetches };
+  return { client, fileFetches, metadata };
 }
 
 async function freshService() {
-  const dir = await mkdtemp(join(tmpdir(), "bookorbit-test-"));
-  const cache = new BookCache(dir);
+  const cache = new BookCache();
   const { client, fileFetches } = stubClient();
-  return { dir, cache, service: new BookService(client, cache), fileFetches };
+  return { cache, service: new BookService(client, cache), fileFetches };
 }
 
 test("parses, measures, and caches a book on first access", async () => {
-  const { dir, service } = await freshService();
-  const parsed = await service.getParsedBook(327);
+  const { service } = await freshService();
+  const { parsed, texts } = await service.readBook(327);
 
   assert.equal(parsed.title, "Sample Book");
   assert.equal(parsed.author, "Test Author");
@@ -57,35 +68,32 @@ test("parses, measures, and caches a book on first access", async () => {
   assert.ok(parsed.sections.every((s) => s.charCount >= 0));
   assert.ok(parsed.sections.some((s) => /Arrival/i.test(s.label)));
 
-  // Cache files were written.
-  const meta = JSON.parse(await readFile(join(dir, "327", "book.json"), "utf8"));
-  assert.equal(meta.bookId, 327);
-  const section0 = await readFile(join(dir, "327", "text", "section-000.txt"), "utf8");
-  assert.ok(section0.length >= 0);
+  assert.equal(texts.length, parsed.sections.length);
+  assert.ok(Object.isFrozen(texts));
 });
 
 test("second access reads from cache without refetching files", async () => {
   const { service, fileFetches } = await freshService();
-  await service.getParsedBook(327);
+  await service.readBook(327);
   const countAfterBuild = fileFetches.length;
   assert.ok(countAfterBuild > 0);
-  await service.getParsedBook(327);
+  await service.readBook(327);
   assert.equal(fileFetches.length, countAfterBuild, "no additional fetches on cache hit");
 });
 
 test("fetches each spine file only once even when bundled", async () => {
   const { service, fileFetches } = await freshService();
-  await service.getParsedBook(327);
+  await service.readBook(327);
   const unique = new Set(fileFetches);
   assert.equal(unique.size, fileFetches.length, "no duplicate file fetches");
 });
 
-test("getSectionText returns distinct text for bundled chapters", async () => {
+test("one request snapshot preserves distinct bundled chapter text", async () => {
   const { service } = await freshService();
-  const parsed = await service.getParsedBook(327);
+  const { parsed, texts } = await service.readBook(327);
   const bundled = parsed.sections.filter((s) => s.spineHref.endsWith("bundle.xhtml"));
-  const first = await service.getSectionText(327, bundled[0].index);
-  const second = await service.getSectionText(327, bundled[1].index);
+  const first = texts[bundled[0].index];
+  const second = texts[bundled[1].index];
   assert.ok(first.length > 100);
   assert.ok(second.length > 100);
   assert.notEqual(first.slice(0, 100), second.slice(0, 100));
@@ -101,4 +109,23 @@ test("searchInBook returns hits with locations and percentages", async () => {
     assert.ok(h.approxBookPercent >= 0 && h.approxBookPercent <= 100);
     assert.match(h.snippet, /the/i);
   }
+});
+
+test("metadata edits reuse text, content revisions replace it, and request snapshots survive eviction", async () => {
+  const { client, metadata } = stubClient();
+  const cache = new BookCache();
+  const service = new BookService(client, cache);
+  const original = await service.readBook(327);
+  for (const updatedAt of ["two", "three"]) {
+    metadata.updatedAt = updatedAt;
+    metadata.title = `Title ${updatedAt}`;
+    const current = await service.readBook(327);
+    assert.equal(current.parsed.title, metadata.title);
+    assert.strictEqual(current.texts, original.texts);
+  }
+  metadata.files[0].contentVersion = "2";
+  const revised = await service.readBook(327);
+  assert.ok(revised.texts.some((text) => text.includes("REVISED_CONTENT_SENTINEL")));
+  assert.ok(original.texts.every((text) => !text.includes("REVISED_CONTENT_SENTINEL")));
+  assert.equal(original.parsed.title, "Sample Book");
 });

@@ -21,6 +21,8 @@ export interface BookFile {
   filename: string | null;
   absolutePath: string | null;
   durationSeconds: number | null;
+  fileHash: string | null;
+  contentVersion: string;
 }
 
 /** Full book detail (GET /books/{id}) — only the fields we use are typed. */
@@ -28,7 +30,7 @@ export interface BookDetail {
   id: number;
   title: string;
   subtitle: string | null;
-  authors: string[];
+  authors: Array<{ id: number; name: string }>;
   seriesName: string | null;
   seriesIndex: number | null;
   language: string | null;
@@ -38,6 +40,7 @@ export interface BookDetail {
   genres: string[];
   tags: string[];
   files: BookFile[];
+  updatedAt?: string;
 }
 
 /** A spine item from GET /epub/{bookId}/info. */
@@ -417,6 +420,8 @@ export interface Section {
 
 /** A section enriched with extracted-text size metadata (cached). */
 export interface SectionWithSize extends Section {
+  pageStart?: number;
+  pageEnd?: number;
   charCount: number;
   wordCount: number;
 }
@@ -426,6 +431,9 @@ export interface ParsedBook {
   bookId: number;
   title: string;
   author: string;
-  sections: SectionWithSize[];
+  sections: readonly SectionWithSize[];
   totalChars: number;
+  format?: "epub" | "pdf";
+  fileId?: number;
+  requiresOcrPages?: readonly number[];
 }

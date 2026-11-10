@@ -1,8 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BookCache } from "../src/cache.js";
@@ -49,6 +46,22 @@ function fakeServer() {
 
 function stubClient() {
   const client = {
+    async getBook(id: number) {
+      return {
+        id,
+        title: "Sample Book",
+        authors: [{ id: 1, name: "Test Author" }],
+        files: [
+          {
+            id: 1,
+            format: "epub",
+            sizeBytes: 123,
+            fileHash: "fixture",
+            contentVersion: "1",
+          },
+        ],
+      };
+    },
     async searchBooks(_q: string) {
       return [
         {
@@ -426,8 +439,7 @@ function sampleBookItem() {
 }
 
 async function setup() {
-  const dir = await mkdtemp(join(tmpdir(), "bookorbit-tools-"));
-  const service = new BookService(stubClient(), new BookCache(dir));
+  const service = new BookService(stubClient(), new BookCache());
   const { server, call } = fakeServer();
   registerTools(server as never, stubClient(), service);
   return { call };

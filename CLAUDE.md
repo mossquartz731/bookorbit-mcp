@@ -40,8 +40,8 @@ node --import tsx scripts/mcp-check.mts   # drives the BUILT server over the MCP
 ```
 
 Config comes from env (or a local `.env`, gitignored — see `.env.example`): `BOOKORBIT_URL`,
-plus either `BOOKORBIT_USERNAME`+`BOOKORBIT_PASSWORD` (preferred) or a static `BOOKORBIT_TOKEN`
-(dev only). Optional `CACHE_DIR`.
+plus one authentication mode: native `BOOKORBIT_SESSION_FILE`, password pair, or static
+`BOOKORBIT_TOKEN`. HTTP and native SSO deployment details live in `docs/gateway.md`.
 
 ## Architecture (the big picture)
 
@@ -51,11 +51,11 @@ Request flow for a tool call:
 tools.ts  ->  book-service.ts  ->  bookorbit-client.ts   (HTTP to BookOrbit)
                      |          ->  epub-structure.ts     (TOC/spine -> sections)
                      |          ->  html-to-text.ts       (XHTML slice -> text)
-                     +--------->  cache.ts                (disk, per bookId)
+                     +--------->  cache.ts                (bounded LRU, immutable snapshots)
 ```
 
 `book-service.ts` is the orchestrator; the other modules are pure/single-purpose and are
-unit-tested in isolation. Everything is keyed by **bookId**, not fileId.
+unit-tested in isolation. Everything is keyed by **bookId** plus optional fileId; the BookOrbit EPUB reader still selects by bookId.
 
 ### Non-obvious design decisions
 
@@ -76,16 +76,21 @@ unit-tested in isolation. Everything is keyed by **bookId**, not fileId.
   via `offset`/`nextOffset`; `search_in_book` returns snippets plus a re-fetchable
   chapter+offset. Preserve these guarantees when editing tools.
 
-- **Auth is short-lived.** BookOrbit access tokens expire in ~15 minutes and there is no
+- **Auth is short-lived.** Native SSO uses BookOrbit's OIDC APIs, native refresh tokens,
+  serialized refresh and atomic private session persistence. A definite refresh401 removes
+  credentials but retains account identity; HTTP drains and re-enters native SSO. Network/5xx
+  failures retain the session. The identity must match on re-enrollment.
+  The existing password path is retained: BookOrbit access tokens expire in ~15 minutes and there is no
   long-lived API key. `bookorbit-client.ts` logs in with username/password, sends the JWT as a
   Bearer token, captures the `refresh_token` cookie, and on a 401 tries `/auth/refresh` then a
   full re-login (`reauthenticate`). BookOrbit's search param is `q` (not `query`), and the base
   URL is normalized to strip a trailing slash.
 
-- **Cache is build-once, per book.** First `getParsedBook(bookId)` fetches every referenced
-  spine file, extracts each section's text, computes char/word counts, and writes
-  `<CACHE_DIR>/<bookId>/book.json` + `text/section-NNN.txt`. Later calls read from disk.
-  Concurrent builds of the same book are de-duplicated via an in-flight map.
+- **Derived text is a bounded in-process LRU.** `readBook` checks live BookOrbit access,
+  keys only on file content revision, and returns one immutable metadata/text snapshot.
+  Metadata edits update the response without reparsing content. Native LRU eviction bounds
+  retention (default64MiB); an oversized book is returned uncached. Each tool keeps its
+  snapshot through completion. Cold builds remain serialized and de-duplicated.
 
 - **Annotations (a.k.a. notes/highlights) are a live, uncached passthrough.** Three read-only
   tools — `list_annotations` (all annotations across the library, paginated via `page`/`pageSize`

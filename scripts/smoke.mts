@@ -3,8 +3,6 @@
  * Uses credentials from .env. Run: node --import tsx scripts/smoke.mts
  * Not part of the unit suite (hits the network).
  */
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../src/config.js";
@@ -17,8 +15,7 @@ if (existsSync(envPath)) (process as any).loadEnvFile?.(envPath);
 
 const config = loadConfig();
 const client = new BookOrbitClient(config.client);
-const cacheDir = await mkdtemp(join(tmpdir(), "bookorbit-smoke-"));
-const service = new BookService(client, new BookCache(cacheDir));
+const service = new BookService(client, new BookCache());
 
 console.log("1) search_books('Absolution')");
 const results = await client.searchBooks("Absolution", 3);
@@ -28,7 +25,7 @@ if (!book) throw new Error("no book found");
 
 console.log(`\n2) list_chapters (build+cache) for bookId=${book.id}`);
 const t0 = Date.now();
-const parsed = await service.getParsedBook(book.id);
+const { parsed, texts } = await service.readBook(book.id);
 console.log(`   title=${parsed.title} author=${parsed.author}`);
 console.log(
   `   chapters=${parsed.sections.length} totalChars=${parsed.totalChars} in ${Date.now() - t0}ms`,
@@ -44,7 +41,7 @@ const biggest = parsed.sections.reduce((a, b) => (b.charCount > a.charCount ? b 
 console.log(
   `\n3) get_chapter chapter=${biggest.index} ('${biggest.label}') first 300 chars:`,
 );
-const text = await service.getSectionText(book.id, biggest.index);
+const text = texts[biggest.index];
 console.log("   " + JSON.stringify(text.slice(0, 300)));
 
 const term = "Area X";
@@ -59,7 +56,7 @@ for (const h of hits) {
 
 console.log("\n5) cache hit (no rebuild):");
 const t1 = Date.now();
-await service.getParsedBook(book.id);
+await service.readBook(book.id);
 console.log(`   re-read in ${Date.now() - t1}ms`);
 
 console.log("\n6) discovery & browse");
