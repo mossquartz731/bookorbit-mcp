@@ -123,6 +123,7 @@ export function registerTools(
         "Search the BookOrbit library by title, author, or series. Returns matching " +
         "books with their bookId and available formats. Use this first to find the " +
         "book (and confirm it has an EPUB or PDF) before reading its text.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         query: z
           .string()
@@ -163,6 +164,7 @@ export function registerTools(
       description:
         "Get full metadata for one book by bookId, including its files and formats. " +
         "Use to select an EPUB or PDF file and to read the description/series info.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         bookId: z.number().int().describe("The book's id (from search_books)."),
       },
@@ -261,6 +263,7 @@ export function registerTools(
         "List a book's chapters/sections with their sizes (character and word counts) " +
         "but NO text. Parses and caches an EPUB or PDF on first call. Use this to see the " +
         "book's structure and pick which chapter to read with get_chapter. PDF outlines become sections; without an outline, each page is a section.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         bookId: z
           .number()
@@ -309,6 +312,7 @@ export function registerTools(
         "Return the plain text of one chapter/section by its index (from list_chapters). " +
         "Output is capped (default ~24000 chars); if the chapter is longer, use offset " +
         "with the returned nextOffset to page through it. Read only what you need.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         bookId: z.number().int().positive().describe("The book's id."),
         fileId: z
@@ -374,6 +378,7 @@ export function registerTools(
         "Keyword search inside one book's text. Returns short snippets with the chapter " +
         "index, character offset, and approximate position (percent through the book). " +
         "Use the returned chapter + offset with get_chapter to read the surrounding text.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         bookId: z.number().int().positive().describe("The book's id."),
         fileId: z
@@ -422,6 +427,7 @@ export function registerTools(
         "book title/author, and the book's own chapter title/index. Paginated: use page with " +
         "the returned total/pageSize to browse, or pass bookId to filter to one book. " +
         "Returns a stats summary (book count, how many have notes, and where they came from).",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         page: z
           .number()
@@ -473,6 +479,7 @@ export function registerTools(
         "List the books the user has annotated (highlighted / added notes to), each with an " +
         "annotation count. Use this to discover which books have annotations before pulling " +
         "them with get_annotations — like search_books precedes reading.",
+      annotations: { readOnlyHint: true },
       inputSchema: {},
     },
     async () =>
@@ -492,6 +499,7 @@ export function registerTools(
         "the book's own chapterTitle/chapterIndex. NOTE: chapterIndex is BookOrbit's own " +
         "chapter numbering, NOT the index used by list_chapters/get_chapter — match on " +
         "chapterTitle if you want to read the surrounding text.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         bookId: z.number().int().describe("The book's id (from search_books)."),
       },
@@ -866,6 +874,7 @@ export function registerTools(
       description:
         "Get the user's reading progress for one book by bookId: per-file percentage and " +
         "position (and audiobook progress when present). Use to answer 'where am I in this book'.",
+      annotations: { readOnlyHint: true },
       inputSchema: {
         bookId: z.number().int().describe("The book's id (from search_books)."),
       },
@@ -898,6 +907,7 @@ export function registerTools(
       description:
         "List the books the user is currently reading, each with progress. Use to answer " +
         "'what am I reading right now'.",
+      annotations: { readOnlyHint: true },
       inputSchema: {},
     },
     async () =>
