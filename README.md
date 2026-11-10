@@ -12,7 +12,7 @@ model find a book, look at its chapter list, and pull only the pieces it needs.
 | Fork maintenance | Policy                                                                                                                                 |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Owner            | `mossquartz731/bookorbit-mcp`; homelab consumes a tested image digest                                                                  |
-| Publication      | CI validates first, then publishes immutable `sha-<commit>` images and a `latest` update channel on trusted pushes                                                   |
+| Publication      | CI validates first, then publishes immutable `sha-<commit>` images and a `latest` update channel on trusted pushes                     |
 | Updates          | Dependabot maintains npm, Docker and GitHub Actions inputs                                                                             |
 | Retirement       | Return to upstream when it supplies PDF/whole-book access, native refreshable SSO and HTTP transport with equivalent access boundaries |
 
