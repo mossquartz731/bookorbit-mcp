@@ -260,7 +260,20 @@ export class BookOrbitClient {
 
   /** The books the user is currently reading, with progress. */
   async listCurrentlyReading(): Promise<CurrentlyReading> {
-    return this.getJson<CurrentlyReading>(`/dashboard/widgets/currently-reading`);
+    const path = "/dashboard/widgets/batch";
+    const response = await this.authFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ widgets: ["currently-reading"] }),
+    });
+    const batch = (await response.json()) as {
+      items: { type: string; data: CurrentlyReading | null; failed: boolean }[];
+    };
+    const widget = batch.items.find((item) => item.type === "currently-reading");
+    if (!widget || widget.failed || !widget.data) {
+      throw new BookOrbitError("Currently reading widget failed", 502, path);
+    }
+    return widget.data;
   }
 
   /** A page of reading sessions for one book, plus aggregate stats. */
