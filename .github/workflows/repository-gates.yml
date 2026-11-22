@@ -17,9 +17,9 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
       - name: Check the proposed merge for whitespace errors
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: git diff --check "$BASE_SHA" HEAD
+        uses: docker://alpine/git@sha256:2306e2b05ee0ef99f5d25b0779f645b24ae9f91ba187107503592fcdfe78da3a # 2.54.1
+        with:
+          args: -c safe.directory=/github/workspace diff --check ${{ github.event.pull_request.base.sha }} HEAD
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -30,18 +30,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Scan commits added by the pull request with Gitleaks
+        uses: docker://ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f # v8.30.1
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          curl --fail --silent --show-error --location \
-            -o "$RUNNER_TEMP/gitleaks.tar.gz" \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          printf '%s  %s\n' \
-            551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
-            "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
-          printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
-          "$RUNNER_TEMP/gitleaks" git --no-banner --redact=100 \
-            --config "$RUNNER_TEMP/gitleaks.toml" --ignore-gitleaks-allow \
-            --gitleaks-ignore-path "$RUNNER_TEMP/empty-gitleaks-ignore" \
-            --log-opts="--diff-merges=first-parent $BASE_SHA..HEAD" .
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: /github/workspace/.git
+          GITLEAKS_CONFIG_TOML: |
+            [extend]
+            useDefault = true
+        with:
+          # Scan the Git directory so a PR's .gitleaksignore cannot suppress findings.
+          args: >-
+            git --no-banner --redact=100 --ignore-gitleaks-allow
+            --gitleaks-ignore-path=/dev/null
+            --log-opts="--diff-merges=first-parent ${{ github.event.pull_request.base.sha }}..HEAD" .git
