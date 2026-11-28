@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer as createTcpServer } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BookOrbitClient } from "../src/bookorbit-client.js";
 import { BookCache } from "../src/cache.js";
@@ -10,7 +11,7 @@ import { BookService } from "../src/book-service.js";
 import { registerTools } from "../src/tools.js";
 import { httpHandler } from "../src/http.js";
 import { parsePdf } from "../src/pdf-text.js";
-import { callbackCode, validateRedirect } from "../src/native-login.js";
+import { callbackCode, nativeLogin, validateRedirect } from "../src/native-login.js";
 import { SessionStore } from "../src/session.js";
 
 const pdf = await readFile(new URL("./fixtures/outline.pdf", import.meta.url));
@@ -66,6 +67,129 @@ test("native SSO callback accepts only the existing marked HTTPS callback and ex
       callbackCode(new URL(`https://books.example/?${query}`), "expected"),
     );
 });
+
+test(
+  "HTTP enrollment keeps its listener and the expected account across expired and rejected attempts",
+  { timeout: 10_000 },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "bookorbit-enrollment-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const store = new SessionStore(join(dir, "session.json"), "https://books.example");
+    await store.save({
+      baseUrl: store.baseUrl,
+      userId: 7,
+      username: "reader",
+      credentials: null,
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      const socket = createTcpServer();
+      socket.on("error", reject);
+      socket.listen(0, "127.0.0.1", () => {
+        const address = socket.address();
+        assert.ok(address && typeof address === "object");
+        socket.close(() => resolve(address.port));
+      });
+    });
+    const origin = `http://127.0.0.1:${port}`;
+    const redirect = `${store.baseUrl}/oauth2-callback?bookorbit_mcp=1`;
+    const firstLink = Promise.withResolvers<URL>();
+    const secondLink = Promise.withResolvers<URL>();
+    const thirdLink = Promise.withResolvers<URL>();
+    const renewalStarted = Promise.withResolvers<void>();
+    const allowRenewal = Promise.withResolvers<void>();
+    const links = [firstLink, secondLink, thirdLink];
+    const diagnostics: string[] = [];
+    const localFetch = globalThis.fetch;
+    const revoked: string[] = [];
+    let attempts = 0;
+    let exchanged = 0;
+    t.mock.method(console, "error", (message: string) => {
+      if (message.startsWith("Complete native BookOrbit sign-in:")) {
+        links.shift()?.resolve(new URL(message.split("\n")[1]));
+      } else {
+        diagnostics.push(message);
+      }
+    });
+    t.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
+      const { pathname } = new URL(input);
+      if (pathname.endsWith("/providers/public"))
+        return Response.json([
+          { slug: "fixture", clientId: "fixture", scopes: "openid" },
+        ]);
+      if (pathname.endsWith("/state")) {
+        const state = `state-${++attempts}`;
+        if (attempts === 2) {
+          renewalStarted.resolve();
+          await allowRenewal.promise;
+        }
+        return Response.json({
+          state,
+          authorizationEndpoint: "https://sso.example/authorize",
+        });
+      }
+      if (pathname.endsWith("/logout")) {
+        revoked.push(JSON.parse(String(init?.body)).refreshToken);
+        return Response.json({});
+      }
+      assert.equal(pathname, "/api/v1/auth/oidc/callback");
+      const { code } = JSON.parse(String(init?.body));
+      const allowed = code === "correct";
+      exchanged++;
+      return Response.json({
+        user: { id: allowed ? 7 : 8, username: allowed ? "reader" : "other" },
+        accessToken: "fixture",
+        refreshToken: (allowed ? "b" : "a").repeat(64),
+      });
+    });
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const enrollment = nativeLogin(
+      {
+        client: { baseUrl: store.baseUrl },
+        cacheMaxMiB: 64,
+        sessionFile: store.path,
+        transport: "http",
+        host: "127.0.0.1",
+        port,
+      },
+      { env: { SSO_REDIRECT_URI: redirect }, continuous: true },
+    );
+    function callback(state: string | null, code: string) {
+      return localFetch(
+        `${origin}/oauth2-callback?bookorbit_mcp=1&state=${state}&code=${code}`,
+      );
+    }
+    const first = await firstLink.promise;
+    assert.equal(first.searchParams.get("prompt"), "login");
+    assert.equal((await localFetch(`${origin}/mcp`, { method: "POST" })).status, 503);
+    t.mock.timers.tick(300_000);
+    await renewalStarted.promise;
+    assert.equal((await localFetch(`${origin}/mcp`, { method: "POST" })).status, 503);
+    allowRenewal.resolve();
+    const second = await secondLink.promise;
+    assert.equal(second.searchParams.get("prompt"), "login");
+    assert.notEqual(
+      first.searchParams.get("code_challenge"),
+      second.searchParams.get("code_challenge"),
+    );
+    assert.equal(
+      (await callback(first.searchParams.get("state"), "expired")).status,
+      400,
+    );
+    assert.equal(exchanged, 0);
+    const wrongUser = await callback(second.searchParams.get("state"), "wrong");
+    assert.equal(wrongUser.status, 403);
+    assert.doesNotMatch(await wrongUser.text(), /"reader"/);
+    assert.deepEqual(revoked, ["a".repeat(64)]);
+    assert.match(diagnostics.join("\n"), /username "reader"/);
+    assert.equal((await store.load()).credentials, null);
+    const third = await thirdLink.promise;
+    const signedIn = await callback(third.searchParams.get("state"), "correct");
+    assert.equal(signedIn.status, 200);
+    assert.match(await signedIn.text(), /BookOrbit MCP enrolled/);
+    await enrollment;
+    assert.equal((await store.load()).credentials?.refreshToken, "b".repeat(64));
+  },
+);
 
 test("rotated native sessions survive restart privately, and concurrent 401s refresh once", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "bookorbit-session-"));

@@ -43,12 +43,7 @@ The ordinary HTTP serving process has no login or callback endpoint.
 
 ## Container first start
 
-HTTP mode enrolls through the same native login flow when credentials are absent, then serves HTTP in the same process. Mount a private persistent state directory, set the configuration
-below, and follow the authorization URL in the application's logs. A restart
-reuses the session. Enrollment expires after five minutes; normal controller
-restart policy permits a fresh attempt. No token copying, exec grant or bootstrap
-Job is needed. A TCP readiness check observes the listener during enrollment;
-verify MCP tool discovery after sign-in before declaring the deployment accepted.
+HTTP mode starts native enrollment when credentials are absent. Use the latest authorization URL in the application logs to sign in. The URL requests fresh authentication so you can choose the enrolled account. The enrollment listener stays up and issues a fresh URL every five minutes until sign-in succeeds. During enrollment, the gateway receives HTTP 503 from `/mcp`. A TCP probe checks callback reachability. Verify MCP tool discovery after sign-in. Subsequent starts reuse the session from the private persistent state directory.
 
 ## Native SSO enrollment
 
@@ -92,7 +87,7 @@ the BookOrbit account ID. HTTP drains its current responses and re-enters native
 on the same listener; the owner signs in again without editing a PVC or copying a
 token. Network/5xx failures retain the credential for retry. Normal inactivity expiry
 is respected, with no background keepalive. Re-enrollment with another account is
-refused and its newly issued session is revoked. Never share the rotating session
+refused and its newly issued session is revoked. The connector logs the expected username, or the BookOrbit user ID for older session files. Never share the rotating session
 file between processes or replicas. Stdio clients re-run the native login command
 and restart after such expiry.
 

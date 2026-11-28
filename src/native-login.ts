@@ -44,10 +44,10 @@ export function callbackCode(url: URL, state: string): string {
   return code;
 }
 
-/** Bounded enrollment command, never exposed by the normal MCP serving process. */
+/** Serve native enrollment until sign-in succeeds or a one-shot attempt expires. */
 export async function nativeLogin(
   config: AppConfig,
-  env: NodeJS.ProcessEnv = process.env,
+  { env = process.env, continuous = false } = {},
 ): Promise<void> {
   if (!config.sessionFile) throw new Error("Set BOOKORBIT_SESSION_FILE for native SSO.");
   const store = new SessionStore(config.sessionFile, config.client.baseUrl);
@@ -85,47 +85,77 @@ export async function nativeLogin(
       : undefined;
   if (!provider)
     throw new Error("Set SSO_PROVIDER to an enabled BookOrbit provider slug.");
-  const { state, authorizationEndpoint } = z
-    .object({ state: z.string().min(1), authorizationEndpoint: z.string().url() })
-    .parse(await json(`/auth/oidc/${encodeURIComponent(provider.slug)}/state`, {}));
-  const verifier = randomBytes(32).toString("base64url");
-  const nonce = randomBytes(32).toString("base64url");
-  const authorization = new URL(authorizationEndpoint);
-  if (
-    authorization.protocol !== "https:" ||
-    authorization.username ||
-    authorization.password
-  )
-    throw new Error("SSO requires an HTTPS authorization endpoint.");
-  for (const [key, value] of Object.entries({
-    response_type: "code",
-    client_id: provider.clientId,
-    redirect_uri: redirect.href,
-    scope: provider.scopes,
-    state,
-    nonce,
-    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-    code_challenge_method: "S256",
-  }))
-    authorization.searchParams.set(key, value);
+  const { slug, clientId, scopes } = provider;
+  const statePath = `/auth/oidc/${encodeURIComponent(slug)}/state`;
+  async function prepareAttempt() {
+    const { state, authorizationEndpoint } = z
+      .object({ state: z.string().min(1), authorizationEndpoint: z.string().url() })
+      .parse(await json(statePath, {}));
+    const verifier = randomBytes(32).toString("base64url");
+    const nonce = randomBytes(32).toString("base64url");
+    const authorization = new URL(authorizationEndpoint);
+    if (
+      authorization.protocol !== "https:" ||
+      authorization.username ||
+      authorization.password
+    )
+      throw new Error("SSO requires an HTTPS authorization endpoint.");
+    for (const [key, value] of Object.entries({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirect.href,
+      scope: scopes,
+      prompt: "login",
+      state,
+      nonce,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge_method: "S256",
+    }))
+      authorization.searchParams.set(key, value);
+    return { state, verifier, nonce, authorization };
+  }
 
+  const firstAttempt = await prepareAttempt();
+  const allowedHosts = config.allowedHosts ?? [
+    `127.0.0.1:${config.port}`,
+    `localhost:${config.port}`,
+    `[::1]:${config.port}`,
+  ];
   await new Promise<void>((resolve, reject) => {
-    let consumed = false;
+    let attempt: typeof firstAttempt | undefined;
+    let timer: ReturnType<typeof setTimeout>;
     const server = createServer(async (req, res) => {
       res.setHeader("Cache-Control", "no-store");
       res.setHeader("Referrer-Policy", "no-referrer");
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       const url = new URL(req.url ?? "/", redirect.origin);
+      if (continuous && url.pathname === "/mcp") {
+        if (
+          req.headers.origin !== undefined ||
+          !allowedHosts.includes(req.headers.host ?? "")
+        ) {
+          res.writeHead(403).end();
+          return;
+        }
+        res
+          .writeHead(503)
+          .end("BookOrbit MCP unavailable until native SSO enrollment completes.");
+        return;
+      }
       if (
         req.method !== "GET" ||
         url.pathname !== redirect.pathname ||
         url.searchParams.getAll("bookorbit_mcp").length !== 1 ||
-        url.searchParams.get("bookorbit_mcp") !== "1" ||
-        consumed
+        url.searchParams.get("bookorbit_mcp") !== "1"
       ) {
         res.writeHead(404).end();
         return;
       }
+      if (!attempt) {
+        res.writeHead(400).end("Invalid or expired sign-in callback.");
+        return;
+      }
+      const { state, verifier, nonce } = attempt;
       let code: string;
       try {
         code = callbackCode(url, state);
@@ -133,7 +163,9 @@ export async function nativeLogin(
         res.writeHead(400).end("Invalid or expired sign-in callback.");
         return;
       }
-      consumed = true;
+      // A valid callback consumes its attempt before the async exchange.
+      attempt = undefined;
+      clearTimeout(timer);
       try {
         const body = await json("/auth/oidc/callback", {
           code,
@@ -145,11 +177,21 @@ export async function nativeLogin(
           deviceLabel: "bookorbit-mcp",
         });
         const credentials = credentialsSchema.parse(body);
-        const userId = z
-          .object({ user: z.object({ id: z.number().int().positive() }) })
-          .parse(body).user.id;
+        const { user } = z
+          .object({
+            user: z.object({
+              id: z.number().int().positive(),
+              username: z.string().min(1),
+            }),
+          })
+          .parse(body);
         try {
-          await store.save({ credentials, baseUrl: config.client.baseUrl, userId });
+          await store.save({
+            credentials,
+            baseUrl: config.client.baseUrl,
+            userId: user.id,
+            username: user.username,
+          });
         } catch (error) {
           // Retire a newly issued session that cannot become this connector's identity.
           await json("/auth/logout", { refreshToken: credentials.refreshToken }).catch(
@@ -161,8 +203,15 @@ export async function nativeLogin(
         finish();
       } catch (error) {
         if (error instanceof SessionIdentityError) {
-          res.writeHead(403).end(error.message);
-          finish(error);
+          res
+            .writeHead(403)
+            .end("Sign in with the previously enrolled BookOrbit account.");
+          if (continuous) {
+            console.error(error.message);
+            renewAttempt();
+          } else {
+            finish(error);
+          }
           return;
         }
         res
@@ -173,22 +222,32 @@ export async function nativeLogin(
         finish(new Error("Native SSO enrollment failed."));
       }
     });
-    const timer = setTimeout(
-      () => finish(new Error("SSO enrollment expired after five minutes.")),
-      300_000,
-    );
+    function startAttempt(next: typeof firstAttempt) {
+      attempt = next;
+      console.error(
+        `Complete native BookOrbit sign-in:\n${next.authorization.href}\nWaiting up to five minutes.`,
+      );
+      timer = setTimeout(() => {
+        attempt = undefined;
+        if (!continuous) {
+          finish(new Error("SSO enrollment expired after five minutes."));
+          return;
+        }
+        renewAttempt();
+      }, 300_000);
+    }
+    function renewAttempt() {
+      void prepareAttempt().then(startAttempt, finish);
+    }
     function finish(error?: Error) {
       clearTimeout(timer);
-      server.close();
-      if (error) reject(error);
-      else resolve();
+      server.close(() => {
+        if (error) reject(error);
+        else resolve();
+      });
     }
     server.requestTimeout = 30_000;
     server.on("error", (error) => finish(error));
-    server.listen(config.port, config.host, () =>
-      console.error(
-        `Complete native BookOrbit sign-in:\n${authorization.href}\nWaiting up to five minutes. The normal MCP service must be stopped during enrollment.`,
-      ),
-    );
+    server.listen(config.port, config.host, () => startAttempt(firstAttempt));
   });
 }

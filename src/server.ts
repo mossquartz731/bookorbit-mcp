@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     if (sessionStore && !session?.credentials) {
       if (config.transport !== "http")
         throw new Error("Complete native SSO enrollment with bookorbit-mcp login.");
-      await nativeLogin(config);
+      await nativeLogin(config, { continuous: true });
       session = await sessionStore.load();
     }
     let expired = () => {};
