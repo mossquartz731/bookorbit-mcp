@@ -11,13 +11,17 @@ export type NativeCredentials = z.infer<typeof credentialsSchema>;
 const sessionSchema = z.object({
   baseUrl: z.string().url(),
   userId: z.number().int().positive(),
+  username: z.string().min(1).optional(),
   credentials: credentialsSchema.nullable(),
 });
 export type NativeSession = z.infer<typeof sessionSchema>;
 
 export class SessionIdentityError extends Error {
-  constructor() {
-    super("Sign in with the previously enrolled BookOrbit account.");
+  constructor({ userId, username }: Pick<NativeSession, "userId" | "username">) {
+    const account = username
+      ? `username ${JSON.stringify(username)}`
+      : `user ID ${userId}`;
+    super(`Sign in with the previously enrolled BookOrbit account (${account}).`);
   }
 }
 
@@ -46,7 +50,7 @@ export class SessionStore {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
     if (existing && existing.userId !== validated.userId)
-      throw new SessionIdentityError();
+      throw new SessionIdentityError(existing);
     if (validated.baseUrl !== this.baseUrl) throw new Error("Session URL mismatch.");
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const temp = `${this.path}.${randomUUID()}.tmp`;
