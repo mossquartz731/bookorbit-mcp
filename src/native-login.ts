@@ -105,7 +105,6 @@ export async function nativeLogin(
       client_id: clientId,
       redirect_uri: redirect.href,
       scope: scopes,
-      prompt: "login",
       state,
       nonce,
       code_challenge: createHash("sha256").update(verifier).digest("base64url"),

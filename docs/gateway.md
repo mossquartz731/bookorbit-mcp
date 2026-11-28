@@ -43,7 +43,7 @@ The ordinary HTTP serving process has no login or callback endpoint.
 
 ## Container first start
 
-HTTP mode starts native enrollment when credentials are absent. Use the latest authorization URL in the application logs to sign in. The URL requests fresh authentication so you can choose the enrolled account. The enrollment listener stays up and issues a fresh URL every five minutes until sign-in succeeds. During enrollment, the gateway receives HTTP 503 from `/mcp`. A TCP probe checks callback reachability. Verify MCP tool discovery after sign-in. Subsequent starts reuse the session from the private persistent state directory.
+HTTP mode starts native enrollment when credentials are absent. Open the latest authorization URL in the application logs in a private browser window and sign in with the previously enrolled account. The enrollment listener stays up and issues a fresh URL every five minutes until sign-in succeeds. During enrollment, the gateway receives HTTP 503 from `/mcp`. A TCP probe checks callback reachability. Verify MCP tool discovery after sign-in. Subsequent starts reuse the session from the private persistent state directory.
 
 ## Native SSO enrollment
 

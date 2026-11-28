@@ -159,14 +159,14 @@ test(
       );
     }
     const first = await firstLink.promise;
-    assert.equal(first.searchParams.get("prompt"), "login");
+    assert.equal(first.searchParams.has("prompt"), false);
     assert.equal((await localFetch(`${origin}/mcp`, { method: "POST" })).status, 503);
     t.mock.timers.tick(300_000);
     await renewalStarted.promise;
     assert.equal((await localFetch(`${origin}/mcp`, { method: "POST" })).status, 503);
     allowRenewal.resolve();
     const second = await secondLink.promise;
-    assert.equal(second.searchParams.get("prompt"), "login");
+    assert.equal(second.searchParams.has("prompt"), false);
     assert.notEqual(
       first.searchParams.get("code_challenge"),
       second.searchParams.get("code_challenge"),
